@@ -1,130 +1,222 @@
+import streamlit as st
 import requests
 import time
+import pandas as pd
 from collections import deque
 
-# --- CONFIGURATION ---
-# REMPLACEZ CECI PAR VOTRE NOUVELLE CLÉ (celle postée est compromise)
-API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6ImJlYzUzMzc0LTg1MmEtNDgzMS05NmYxLTYxMDA5ZjU1Y2ZmMSIsImlhdCI6MTc2NjM5OTY2Nywic3ViIjoiZGV2ZWxvcGVyLzQzMGFmNGE1LWYzYjQtMGQzOS1iOWIyLTljZGFmMGNiYzlhMyIsInNjb3BlcyI6WyJyb3lhbGUiXSwibGltaXRzIjpbeyJ0aWVyIjoiZGV2ZWxvcGVyL3NpbHZlciIsInR5cGUiOiJ0aHJvdHRsaW5nIn0seyJjaWRycyI6WyIxNzYuMTcwLjY5LjIwNCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.YnJQOep4EeaZoSVsNfGG9kbLlkdbiME0H_q7FIiaoGHCD3Y39v1HqfqYZ7q05bB6OPzjssSSMeDQ86WUTwuooQ"
-BASE_URL = "https://api.clashroyale.com/v1"
-
-# Le point de départ
-SEED_PLAYER_TAG = "#989R2RPQ"
-
-# Filtres de recrutement (Ce qu'on cherche)
-MIN_TROPHIES = 7500
-MAX_TROPHIES = 11000
-
-# Filtre de "qualité de scan" 
-# Pour éviter de scanner des joueurs trop faibles qui polluent la recherche,
-# on ajoute à la file d'attente seulement les joueurs au dessus de ce score :
-MIN_TROPHIES_TO_SCAN = 7000 
-
-headers = {
-    "Authorization": f"Bearer {API_TOKEN}",
-    "Accept": "application/json"
-}
+# --- CONFIGURATION DE LA PAGE ---
+st.set_page_config(
+    page_title="Clash Royale Recruiter",
+    page_icon="👑",
+    layout="wide"
+)
 
 # --- FONCTIONS API ---
+def get_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
 
-def get_battle_log(player_tag):
+def get_battle_log(player_tag, token):
     """Récupère les derniers combats"""
     clean_tag = player_tag.replace("#", "%23")
-    url = f"{BASE_URL}/players/{clean_tag}/battlelog"
+    url = f"https://api.clashroyale.com/v1/players/{clean_tag}/battlelog"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=get_headers(token), timeout=5)
         if response.status_code == 200:
             return response.json()
         return []
     except:
         return []
 
-def get_player_detail(player_tag):
+def get_player_detail(player_tag, token):
     """Récupère les détails précis"""
     clean_tag = player_tag.replace("#", "%23")
-    url = f"{BASE_URL}/players/{clean_tag}"
+    url = f"https://api.clashroyale.com/v1/players/{clean_tag}"
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=get_headers(token), timeout=5)
         if response.status_code == 200:
             return response.json()
         return None
     except:
         return None
 
-# --- MOTEUR SNOWBALL ---
+# --- STATE MANAGEMENT ---
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
+if 'results' not in st.session_state:
+    st.session_state.results = []
 
-def start_snowball(seed_tag):
-    # La file d'attente (FIFO - First In First Out)
-    scan_queue = deque([seed_tag])
+def toggle_scan():
+    st.session_state.scanning = not st.session_state.scanning
+
+# --- INTERFACE UTILISATEUR ---
+st.title("👑 Clash Royale - Chasseur de Recrues")
+st.markdown("Ce scanner utilise la méthode **Snowball** pour trouver des joueurs sans clan à haut niveau.")
+
+# 1. BARRE LATÉRALE (Configuration)
+with st.sidebar:
+    st.header("⚙️ Configuration")
     
-    # Mémoire cache pour ne pas scanner deux fois le même joueur
-    visited_tags = set([seed_tag])
+    # Champ pour le token
+    DEFAULT_TOKEN = "" # Laisser vide pour sécurité, l'utilisateur doit le mettre
+    api_token = st.text_input("Clé API (Token)", value=DEFAULT_TOKEN, type="password", help="Collez votre clé API Developer ici.")
     
-    found_count = 0
-    scanned_count = 0
+    st.divider()
+    
+    seed_tag = st.text_input("Tag du joueur 'Graine'", "#989R2RPQ")
+    
+    st.subheader("🎯 Cibles")
+    min_trophies = st.number_input("Trophées Min", value=7500, step=100)
+    max_trophies = st.number_input("Trophées Max", value=11000, step=100)
+    
+    st.subheader("🕷️ Paramètres du Crawler")
+    min_scan_quality = st.number_input("Qualité Scan (Min Trophées)", value=7000, help="Ne scanne pas les adversaires en dessous de ce score.")
+    max_results = st.number_input("Arrêter après X recrues", value=50, step=10)
+    
+    st.divider()
+    
+    # Bouton Start/Stop
+    if st.session_state.scanning:
+        st.button("🛑 ARRÊTER", on_click=toggle_scan, type="secondary", use_container_width=True)
+    else:
+        st.button("🚀 LANCER LA RECHERCHE", on_click=toggle_scan, type="primary", use_container_width=True)
 
-    print(f"🚀 Démarrage du Snowball à partir de {seed_tag}...")
-    print(f"🎯 Cible : {MIN_TROPHIES} - {MAX_TROPHIES} trophées sans clan.")
-    print("-" * 50)
+# 2. ZONE PRINCIPALE - Métriques
+col1, col2, col3 = st.columns(3)
+with col1:
+    metric_scanned = st.empty()
+with col2:
+    metric_found = st.empty()
+with col3:
+    status_text = st.empty()
 
-    while len(scan_queue) > 0:
-        # 1. On prend le prochain joueur dans la file
-        current_tag = scan_queue.popleft()
+st.divider()
+
+# Résultats et Logs
+col_res, col_logs = st.columns([2, 1])
+
+with col_res:
+    st.subheader("� Résultats")
+    results_placeholder = st.empty()
+
+with col_logs:
+    st.subheader("📜 Logs")
+    logs_container = st.empty()
+
+# --- LOGIQUE PRINCIPALE ---
+if st.session_state.scanning:
+    if not api_token:
+        st.error("⚠️ Veuillez entrer une clé API valide dans la barre latérale.")
+        st.session_state.scanning = False
+    else:
+        # Initialisation des variables
+        scan_queue = deque([seed_tag])
+        visited_tags = set([seed_tag])
         
-        # Petit affichage de progression
-        # print(f"🔍 Scan du journal de {current_tag} (File d'attente: {len(scan_queue)})")
-
-        battles = get_battle_log(current_tag)
+        # On reprend les résultats existants si on veut accumuler, 
+        # mais ici on reset à chaque lancement pour simplifier la logique Snowball
+        found_players = [] 
+        logs = []
         
-        # Pour chaque combat dans son historique
-        for battle in battles:
-            opponents = battle.get('opponent', [])
+        scanned_count = 0
+        found_count = 0
+        
+        status_text.info("🔄 Scan en cours...")
+        metric_scanned.metric("Profils Analysés", 0)
+        metric_found.metric("✅ Recrues Trouvées", 0)
+
+        try:
+            while len(scan_queue) > 0 and found_count < max_results:
+                if not st.session_state.scanning:
+                    break
+                
+                current_tag = scan_queue.popleft()
+                
+                # Update Logs
+                logs.append(f"🔍 Analyse: {current_tag}")
+                if len(logs) > 15: logs.pop(0)
+                logs_container.code("\n".join(logs), language="text")
+                
+                battles = get_battle_log(current_tag, api_token)
+                
+                for battle in battles:
+                    if not st.session_state.scanning: break
+                    
+                    opponents = battle.get('opponent', [])
+                    
+                    for opp in opponents:
+                        opp_tag = opp['tag']
+
+                        if opp_tag not in visited_tags:
+                            visited_tags.add(opp_tag)
+                            scanned_count += 1
+                            metric_scanned.metric("Profils Analysés", scanned_count)
+                            
+                            player_data = get_player_detail(opp_tag, api_token)
+                            
+                            if player_data:
+                                trophies = player_data.get("trophies", 0)
+                                has_clan = "clan" in player_data
+                                name = player_data.get("name", "Unknown")
+                                
+                                # CRITÈRE DE RECRUTEMENT
+                                if not has_clan and min_trophies <= trophies <= max_trophies:
+                                    found_count += 1
+                                    metric_found.metric("✅ Recrues Trouvées", found_count)
+                                    
+                                    clean_tag_link = opp_tag.replace("#", "")
+                                    new_player = {
+                                        "Nom": name,
+                                        "Trophées": trophies,
+                                        "Tag": opp_tag,
+                                        "Lien RoyaleAPI": f"https://royaleapi.com/player/{clean_tag_link}",
+                                    }
+                                    found_players.append(new_player)
+                                    st.session_state.results = found_players # Save to state
+                                    
+                                    # Mise à jour Tableau
+                                    df = pd.DataFrame(found_players)
+                                    results_placeholder.dataframe(
+                                        df,
+                                        column_config={
+                                            "Lien RoyaleAPI": st.column_config.LinkColumn("Lien"),
+                                        },
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+
+                                    if found_count >= max_results:
+                                        break
+                                
+                                # CRITÈRE DE CONTINUATION (SNOWBALL)
+                                if trophies >= min_scan_quality:
+                                    scan_queue.append(opp_tag)
+                            
+                            time.sleep(0.05) # Rate limit
+                    
+                    if found_count >= max_results:
+                        break
+                
+                time.sleep(0.1)
+
+            st.session_state.scanning = False
+            status_text.success("Terminé !")
             
-            for opp in opponents:
-                opp_tag = opp['tag']
+        except Exception as e:
+            st.error(f"Erreur: {e}")
+            st.session_state.scanning = False
 
-                # Si on ne connait pas ce joueur, on l'analyse
-                if opp_tag not in visited_tags:
-                    visited_tags.add(opp_tag) # On le marque comme "vu"
-                    
-                    player_data = get_player_detail(opp_tag)
-                    scanned_count += 1
-                    
-                    if player_data:
-                        trophies = player_data.get("trophies", 0)
-                        has_clan = "clan" in player_data
-                        name = player_data.get("name", "Unknown")
-
-                        # --- VERIFICATION : EST-CE UNE RECRUE POTENTIELLE ? ---
-                        if not has_clan and MIN_TROPHIES <= trophies <= MAX_TROPHIES:
-                            found_count += 1
-                            print(f"✅ [{found_count}] RECRUE TROUVÉE !")
-                            print(f"   Nom: {name} | Trophées: {trophies}")
-                            print(f"   Tag: {opp_tag}")
-                            print(f"   🔗 https://royaleapi.com/player/{opp_tag.replace('#', '')}")
-                            print("-" * 30)
-                        
-                        # --- LOGIQUE DE CASCADE ---
-                        # Si le joueur a un bon niveau (même s'il a un clan), 
-                        # on l'ajoute à la file pour scanner SES adversaires plus tard.
-                        # Cela permet de rester dans le "Haut Ladder".
-                        if trophies >= MIN_TROPHIES_TO_SCAN:
-                            scan_queue.append(opp_tag)
-                            # print(f"   -> Ajouté à la file (niv {trophies})")
-                    
-                    # Pause très courte pour respecter l'API (Rate Limit)
-                    time.sleep(0.05)
-
-        # Pause entre chaque scan de journal de combat complet
-        time.sleep(0.1)
-
-        # Sécurité anti-crash si la liste devient vide (peu probable en haut niveau)
-        if len(scan_queue) == 0:
-            print("File d'attente vide. Fin du scan.")
-            break
-
-# --- LANCEMENT ---
-if __name__ == "__main__":
-    try:
-        start_snowball(SEED_PLAYER_TAG)
-    except KeyboardInterrupt:
-        print("\n🛑 Script arrêté par l'utilisateur.")
+# Export (quand le scan est fini ou arrêté)
+if st.session_state.results:
+    st.divider()
+    df_final = pd.DataFrame(st.session_state.results)
+    csv = df_final.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "� Télécharger la liste (CSV)",
+        csv,
+        "recrues.csv",
+        "text/csv",
+        type="primary"
+    )
