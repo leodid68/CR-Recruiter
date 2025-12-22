@@ -93,21 +93,7 @@ if st.session_state.scanning:
         while queue and st.session_state.scanning and len(st.session_state.found_players) < limit:
             current_tag = queue.popleft()
             
-            # 1. Récupérer l'historique de combat (Battle Log) pour trouver de nouveaux tags
-            battles = get_battle_log(current_tag, api_key)
-            
-            for battle in battles:
-                # Récupérer tous les participants (équipe et adversaires)
-                participants = battle.get('team', []) + battle.get('opponent', [])
-                for p in participants:
-                    p_tag = p.get('tag')
-                    if p_tag and p_tag not in visited:
-                        visited.add(p_tag)
-                        queue.append(p_tag)
-            
-            # 2. Vérifier si le joueur actuel correspond aux critères (si on a ses détails)
-            # Note: Pour optimiser, on peut vérifier les détails des joueurs ajoutés à la queue
-            # Prenons le joueur courant s'il n'a pas déjà été "analysé" pour recrutement
+            # --- 1. ANALYSE DU JOUEUR (Est-ce une recrue ?) ---
             player_data = get_player(current_tag, api_key)
             scanned_count += 1
             
@@ -124,6 +110,20 @@ if st.session_state.scanning:
                         "Niveau": player_data.get('expLevel', '?'),
                         "Lien": f"https://royaleapi.com/player/{clean_tag(player_data['tag'])}"
                     })
+            
+            # --- 2. EFFET BOULE DE NEIGE (On cherche de nouveaux joueurs via son historique) ---
+            # IMPORTANT : On le fait pour TOUS les joueurs, même ceux qui ont un clan !
+            # C'est ça qui permet de trouver des joueurs sans clan en naviguant de proche en proche.
+            battles = get_battle_log(current_tag, api_key)
+            
+            for battle in battles:
+                # Récupérer tous les participants (équipe et adversaires)
+                participants = battle.get('team', []) + battle.get('opponent', [])
+                for p in participants:
+                    p_tag = p.get('tag')
+                    if p_tag and p_tag not in visited:
+                        visited.add(p_tag)
+                        queue.append(p_tag)
             
             # Mise à jour de l'affichage
             found_count = len(st.session_state.found_players)
