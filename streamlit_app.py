@@ -22,6 +22,32 @@ with st.sidebar:
     st.subheader("🌱 Point de départ")
     seed_tag = st.text_input("Tag du joueur initial", value="#989R2RPQ", help="Le script commencera à fouiller à partir de ce joueur.")
 
+# --- Gestion des Stats API ---
+if 'api_stats' not in st.session_state:
+    st.session_state.api_stats = {
+        'requests': 0,
+        'success': 0,
+        'rate_limits': 0,
+        'errors': 0
+    }
+
+def update_stats(status_code):
+    st.session_state.api_stats['requests'] += 1
+    if status_code == 200:
+        st.session_state.api_stats['success'] += 1
+    elif status_code == 429:
+        st.session_state.api_stats['rate_limits'] += 1
+    else:
+        st.session_state.api_stats['errors'] += 1
+
+def reset_stats():
+    st.session_state.api_stats = {
+        'requests': 0,
+        'success': 0,
+        'rate_limits': 0,
+        'errors': 0
+    }
+
 # --- Fonctions API ---
 def get_headers(api_key):
     return {"Authorization": f"Bearer {api_key}"}
@@ -33,6 +59,8 @@ def get_player(tag, api_key):
     url = f"https://api.clashroyale.com/v1/players/%23{clean_tag(tag)}"
     try:
         response = requests.get(url, headers=get_headers(api_key), timeout=5)
+        update_stats(response.status_code)
+        
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 429:
@@ -40,16 +68,25 @@ def get_player(tag, api_key):
             return None
         return None
     except:
+        st.session_state.api_stats['errors'] += 1
         return None
 
 def get_battle_log(tag, api_key):
     url = f"https://api.clashroyale.com/v1/players/%23{clean_tag(tag)}/battlelog"
     try:
         response = requests.get(url, headers=get_headers(api_key), timeout=5)
+        update_stats(response.status_code)
+        
         if response.status_code == 200:
             return response.json()
+        
+        # Si rate limit sur battlelog, on attend aussi
+        if response.status_code == 429:
+             time.sleep(1)
+             
         return []
     except:
+        st.session_state.api_stats['errors'] += 1
         return []
 
 # --- État de l'application ---
@@ -60,12 +97,28 @@ if 'scanning' not in st.session_state:
 
 def toggle_scan():
     st.session_state.scanning = not st.session_state.scanning
+    if st.session_state.scanning:
+        # Reset si on relance une recherche propre
+        if len(st.session_state.found_players) >= limit:
+             st.session_state.found_players = []
+             reset_stats()
 
 # --- Interface Principale ---
 col1, col2 = st.columns([1, 4])
 with col1:
     btn_label = "🛑 Arrêter" if st.session_state.scanning else "🚀 Lancer la recherche"
     st.button(btn_label, on_click=toggle_scan, use_container_width=True)
+
+# Affichage des Stats API
+stats_container = st.container()
+with stats_container:
+    cols = st.columns(4)
+    cols[0].metric("🌐 Requêtes Total", st.session_state.api_stats['requests'])
+    cols[1].metric("✅ Succès", st.session_state.api_stats['success'])
+    cols[2].metric("⚠️ Rate Limits (429)", st.session_state.api_stats['rate_limits'], 
+                   delta_color="inverse" if st.session_state.api_stats['rate_limits'] > 0 else "normal")
+    cols[3].metric("❌ Erreurs", st.session_state.api_stats['errors'],
+                   delta_color="inverse" if st.session_state.api_stats['errors'] > 0 else "normal")
 
 status_container = st.empty()
 results_container = st.empty()
@@ -82,12 +135,6 @@ if st.session_state.scanning:
         visited = {seed_tag}
         scanned_count = 0
         
-        # On ne vide pas la liste si on relance, sauf si c'est un nouveau scan complet
-        # Ici on simplifie : nouveau clic = nouvelle recherche si la liste est vide ou si on veut reset
-        # Pour faire simple : reset à chaque lancement
-        if len(st.session_state.found_players) >= limit:
-             st.session_state.found_players = []
-
         status_container.info(f"🔍 Démarrage de l'analyse via {seed_tag}...")
         
         while queue and st.session_state.scanning and len(st.session_state.found_players) < limit:
@@ -112,10 +159,12 @@ if st.session_state.scanning:
                     })
             
             # --- 2. EFFET BOULE DE NEIGE (On cherche de nouveaux joueurs via son historique) ---
-            # IMPORTANT : On le fait pour TOUS les joueurs, même ceux qui ont un clan !
-            # C'est ça qui permet de trouver des joueurs sans clan en naviguant de proche en proche.
             battles = get_battle_log(current_tag, api_key)
             
+            # DEBUG
+            if not battles and st.session_state.api_stats['rate_limits'] > 5:
+                 status_container.warning(f"⚠️ Trop de Rate Limits ! L'API bloque les requêtes. Pause nécessaire.")
+
             for battle in battles:
                 # Récupérer tous les participants (équipe et adversaires)
                 participants = battle.get('team', []) + battle.get('opponent', [])
@@ -127,6 +176,14 @@ if st.session_state.scanning:
             
             # Mise à jour de l'affichage
             found_count = len(st.session_state.found_players)
+            
+            # Update metrics directly in the loop to allow live view
+            with stats_container:
+                 # Hack to force refresh of metrics without full rerun (Streamlit quirks)
+                 # But standard rerun loop handles this usually. 
+                 # We rely on the implicit cycle.
+                 pass
+
             status_container.markdown(f"""
                 **État de la recherche :**
                 - 🕵️ Joueurs scannés : `{scanned_count}`
@@ -143,7 +200,7 @@ if st.session_state.scanning:
                     use_container_width=True
                 )
 
-            # Petit délai pour éviter de spammer l'API trop violemment
+            # Petit délai pour éviter de spammer l'API
             time.sleep(0.1)
         
         if len(st.session_state.found_players) >= limit:
