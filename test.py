@@ -2,8 +2,31 @@ import streamlit as st
 import requests
 import time
 import pandas as pd
+import os
+import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- HISTORY MANAGEMENT ---
+HISTORY_FILE = "recruiter_history.json"
+
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r') as f:
+                return set(json.load(f))
+        except:
+            return set()
+    return set()
+
+def save_history(tags):
+    with open(HISTORY_FILE, 'w') as f:
+        json.dump(list(tags), f)
+
+def clear_history():
+    if os.path.exists(HISTORY_FILE):
+        os.remove(HISTORY_FILE)
+    return set()
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="CR Recruiter", page_icon="👑", layout="wide")
@@ -29,32 +52,45 @@ def stop_scan():
 def send_telegram(bot_token, chat_id, players):
     """Envoie une liste de joueurs via Telegram avec liens CR"""
     if not bot_token or not chat_id:
+        print("DEBUG: Missing bot_token or chat_id")
         return False
     
-    message = "🎯 *Nouvelles Recrues CR !*\n"
+    # Escape special Markdown characters in names
+    def escape_md(text):
+        for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+            text = text.replace(char, '\\' + char)
+        return text
+    
+    message = "🎯 Nouvelles Recrues CR !\n"
     message += "━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, p in enumerate(players, 1):
         clean_tag = p['Tag'].replace('#', '')
-        message += f"*{i}. {p['Nom']}*\n"
-        message += f"   🏆 {p['Trophées']} (Best: {p.get('Best', 'N/A')})\n"
+        name = escape_md(str(p.get('Nom', 'Unknown')))
+        message += f"{i}. {name}\n"
+        message += f"   🏆 {p.get('Trophées', 0)} (Best: {p.get('Best', 'N/A')})\n"
         message += f"   🃏 {p.get('Carte Fav', 'N/A')}\n"
-        message += f"   📅 Actif: {p.get('Dernière Partie', 'N/A')}\n"
-        message += f"   [👤 Profil RoyaleAPI](https://royaleapi.com/player/{clean_tag})\n"
+        message += f"   📅 {p.get('Dernière Partie', 'N/A')}\n"
+        message += f"   👤 https://royaleapi.com/player/{clean_tag}\n"
         message += "──────────────────\n"
+    
+    # Limite Telegram: 4096 chars
+    if len(message) > 4000:
+        message = message[:4000] + "\n... (tronqué)"
     
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     data = {
         "chat_id": chat_id,
         "text": message,
-        "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }
     
     try:
         r = requests.post(url, data=data, timeout=10)
+        print(f"DEBUG Telegram: status={r.status_code}, response={r.text[:200]}")
         return r.status_code == 200
-    except:
+    except Exception as e:
+        print(f"DEBUG Telegram error: {e}")
         return False
 
 # --- SIDEBAR CONFIG ---
@@ -77,8 +113,20 @@ with st.sidebar:
     # --- TELEGRAM CONFIG ---
     st.subheader("📱 Telegram")
     telegram_token = st.text_input("Bot Token", value="8532137772:AAGcnzo6D5rDleWEc0hPb-BdlS4lg1hrBF8", type="password")
-    telegram_chat_id = st.text_input("Chat ID", value="-5090698762")
+    telegram_chat_id = st.text_input("Chat ID", value="-1003643661262")
     telegram_batch = st.number_input("Notifier tous les X joueurs", value=20, min_value=5, step=5)
+    
+    st.divider()
+    
+    # --- HISTORIQUE ---
+    st.subheader("📜 Historique")
+    use_history = st.checkbox("Ignorer joueurs déjà trouvés", value=True, help="Ne pas afficher les joueurs déjà trouvés lors de précédentes recherches")
+    history = load_history()
+    st.caption(f"{len(history)} joueurs en historique")
+    if st.button("🗑️ Vider l'historique"):
+        clear_history()
+        st.success("Historique vidé !")
+        st.rerun()
     
     st.divider()
     
@@ -109,8 +157,16 @@ def get_player(tag):
     except:
         return None
 
+def get_clan(tag):
+    url = f"https://api.clashroyale.com/v1/clans/{tag.replace('#', '%23')}"
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except:
+        return None
+
 # --- TABS ---
-tab_scan, tab_stats = st.tabs(["🔍 Recherche", "📊 Statistiques"])
+tab_scan, tab_stats, tab_clan = st.tabs(["🔍 Recherche", "📊 Statistiques", "🏰 Mon Clan"])
 
 with tab_scan:
     # Métriques
@@ -174,6 +230,10 @@ with tab_scan:
                                     has_clan = "clan" in player
                                     
                                     if not has_clan and min_trophies <= trophies <= max_trophies:
+                                        # Vérifier l'historique
+                                        if use_history and tag in history:
+                                            continue  # Déjà trouvé avant, on skip
+                                        
                                         clean_tag = tag.replace('#', '')
                                         
                                         # Données supplémentaires
@@ -232,13 +292,19 @@ with tab_scan:
             st.session_state.scanning = False
             st.session_state.found = found
             
+            # Sauvegarder dans l'historique
+            if found:
+                new_tags = {p['Tag'] for p in found}
+                updated_history = history.union(new_tags)
+                save_history(updated_history)
+            
             # Envoyer les derniers joueurs restants
             if telegram_chat_id and len(found) > st.session_state.last_notified:
                 remaining = found[st.session_state.last_notified:]
                 send_telegram(telegram_token, telegram_chat_id, remaining)
             
             if found:
-                st.success(f"🎉 Terminé ! {len(found)} recrues trouvées.")
+                st.success(f"🎉 Terminé ! {len(found)} recrues trouvées. ({len(history) + len(found)} en historique)")
                 df = pd.DataFrame(found)
                 st.download_button("📥 Télécharger CSV", df.to_csv(index=False), "recrues.csv", "text/csv")
             else:
@@ -288,3 +354,123 @@ with tab_stats:
             st.metric("Q3 (75%)", f"{df['Trophées'].quantile(0.75):.0f}")
     else:
         st.info("Lancez une recherche pour voir les statistiques.")
+
+with tab_clan:
+    st.subheader("🏰 Dashboard du Clan")
+    
+    clan_tag = st.text_input("Tag du Clan", value="#GPYQUC8U")
+    
+    if st.button("📊 Charger les données", type="primary"):
+        clan_data = get_clan(clan_tag)
+        
+        if clan_data:
+            # Infos générales
+            st.markdown(f"### {clan_data.get('name', 'N/A')} `{clan_data.get('tag', '')}`")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("👥 Membres", f"{len(clan_data.get('memberList', []))}/50")
+            col2.metric("🏆 Trophées Requis", clan_data.get('requiredTrophies', 0))
+            col3.metric("🎖️ Score Guerre", clan_data.get('clanWarTrophies', 0))
+            col4.metric("💰 Dons/semaine", clan_data.get('donationsPerWeek', 0))
+            
+            st.divider()
+            
+            # Liste des membres
+            members = clan_data.get('memberList', [])
+            if members:
+                member_data = []
+                progress_bar = st.progress(0, text="Chargement des activités...")
+                
+                for idx, m in enumerate(members):
+                    # Récupérer l'activité via battlelog
+                    battles = get_battle_log(m.get('tag', ''))
+                    
+                    if battles:
+                        last_battle_time = battles[0].get('battleTime', '')
+                        if last_battle_time:
+                            # Format: 20231222T153500.000Z
+                            from datetime import datetime
+                            try:
+                                battle_date = datetime.strptime(last_battle_time[:15], '%Y%m%dT%H%M%S')
+                                days_ago = (datetime.now() - battle_date).days
+                                last_battle = battle_date.strftime('%Y-%m-%d %H:%M')
+                                
+                                # Status d'activité
+                                if days_ago == 0:
+                                    status = "🟢 Actif"
+                                elif days_ago <= 1:
+                                    status = "🟡 Hier"
+                                elif days_ago <= 3:
+                                    status = "🟠 3 jours"
+                                elif days_ago <= 7:
+                                    status = "🔴 7 jours"
+                                else:
+                                    status = f"⚫ {days_ago}j"
+                            except:
+                                last_battle = "N/A"
+                                days_ago = 999
+                                status = "❓"
+                        else:
+                            last_battle = "N/A"
+                            days_ago = 999
+                            status = "❓"
+                    else:
+                        last_battle = "Privé"
+                        days_ago = 999
+                        status = "🔒"
+                    
+                    member_data.append({
+                        "Nom": m.get('name', ''),
+                        "Rôle": m.get('role', '').replace('coLeader', 'Co-Leader').replace('elder', 'Aîné').replace('member', 'Membre').replace('leader', 'Chef'),
+                        "Trophées": m.get('trophies', 0),
+                        "Dons": m.get('donations', 0),
+                        "Reçus": m.get('donationsReceived', 0),
+                        "Dernière Partie": last_battle,
+                        "Inactif (j)": days_ago if days_ago < 999 else "N/A",
+                        "Statut": status,
+                        "Tag": m.get('tag', '')
+                    })
+                    
+                    progress_bar.progress((idx + 1) / len(members), text=f"Analyse {idx+1}/{len(members)}...")
+                    time.sleep(0.05)
+                
+                progress_bar.empty()
+                
+                df_members = pd.DataFrame(member_data)
+                
+                # Stats du clan
+                st.subheader("📈 Statistiques")
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("🏆 Trophées Moyen", f"{df_members['Trophées'].mean():.0f}")
+                col_b.metric("💝 Dons Moyen", f"{df_members['Dons'].mean():.1f}")
+                col_c.metric("⭐ Meilleur", df_members['Trophées'].max())
+                
+                st.divider()
+                
+                # Top Donateurs
+                st.subheader("🏅 Top 5 Donateurs")
+                top_donors = df_members.nlargest(5, 'Dons')[['Nom', 'Dons', 'Rôle']]
+                st.dataframe(top_donors, use_container_width=True, hide_index=True)
+                
+                # Membres avec 0 dons
+                zero_dons = df_members[df_members['Dons'] == 0]
+                if len(zero_dons) > 0:
+                    st.subheader(f"⚠️ Membres sans dons ({len(zero_dons)})")
+                    st.dataframe(zero_dons[['Nom', 'Trophées', 'Statut', 'Rôle']], use_container_width=True, hide_index=True)
+                
+                # Membres inactifs (7+ jours)
+                inactive = df_members[df_members['Inactif (j)'].apply(lambda x: isinstance(x, int) and x >= 7)]
+                if len(inactive) > 0:
+                    st.subheader(f"🔴 Membres inactifs 7+ jours ({len(inactive)})")
+                    st.dataframe(inactive[['Nom', 'Dernière Partie', 'Inactif (j)', 'Dons', 'Rôle']], use_container_width=True, hide_index=True)
+                
+                
+                # Liste complète
+                st.subheader("👥 Liste Complète")
+                st.dataframe(df_members, use_container_width=True, hide_index=True)
+                
+                # Export
+                csv = df_members.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Exporter CSV", csv, "clan_members.csv", "text/csv")
+        else:
+            st.error("Impossible de charger les données du clan. Vérifiez le tag et votre clé API.")
