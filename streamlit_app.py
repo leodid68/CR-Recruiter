@@ -1,20 +1,64 @@
 import streamlit as st
 import pandas as pd
-import asyncio
+import requests
 import csv
 import json
 import io
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-
-from api import ClashRoyaleAPI
-from scanner import PlayerScanner, ScanFilters, FoundPlayer, ScanStats
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Clash Royale Recruiter", page_icon="⚔️", layout="wide")
 
 st.title("⚔️ Clash Royale - Recruteur de Talents")
 st.markdown("Trouvez des joueurs **sans clan** avec notre algorithme de recherche avancé.")
+
+# --- API FUNCTIONS ---
+BASE_URL = "https://api.clashroyale.com/v1"
+
+def get_headers(key):
+    return {"Authorization": f"Bearer {key}", "Accept": "application/json"}
+
+def get_player_detail(session, player_tag, headers):
+    clean_tag = player_tag.replace("#", "%23")
+    url = f"{BASE_URL}/players/{clean_tag}"
+    try:
+        resp = session.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        elif resp.status_code == 429:
+            time.sleep(1)
+            return get_player_detail(session, player_tag, headers)
+        return None
+    except:
+        return None
+
+def get_battle_log(session, player_tag, headers):
+    clean_tag = player_tag.replace("#", "%23")
+    url = f"{BASE_URL}/players/{clean_tag}/battlelog"
+    try:
+        resp = session.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            return resp.json()
+        elif resp.status_code == 429:
+            time.sleep(1)
+            return get_battle_log(session, player_tag, headers)
+        return []
+    except:
+        return []
+
+def is_french_relevance(battle_log):
+    fr_signals = 0
+    for battle in battle_log:
+        for opp in battle.get('opponent', []):
+            clan = opp.get('clan')
+            if clan:
+                clan_name = clan.get('name', '').lower()
+                if any(x in clan_name for x in ["fr ", " fr", "france", "français"]):
+                    fr_signals += 1
+    return fr_signals > 0
 
 # --- SIDEBAR : CONFIGURATION ---
 with st.sidebar:
@@ -39,20 +83,17 @@ with st.sidebar:
     seed_tag = st.text_input("Tag Joueur Initial", value="#989R2RPQ")
     
     st.subheader("⚡ Performance")
-    concurrency = st.slider("Requêtes parallèles", 5, 50, 20)
+    max_workers = st.slider("Threads parallèles", 5, 20, 10)
 
 # --- SESSION STATE ---
 if 'players_found' not in st.session_state:
     st.session_state.players_found = []
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
-if 'stats' not in st.session_state:
-    st.session_state.stats = None
 
 def start_scanning():
     st.session_state.scanning = True
     st.session_state.players_found = []
-    st.session_state.stats = None
 
 def stop_scanning():
     st.session_state.scanning = False
@@ -66,79 +107,16 @@ with col_btn2:
 
 # Stats Dashboard
 stats_cols = st.columns(5)
-stats_placeholders = {
-    "scanned": stats_cols[0].empty(),
-    "found": stats_cols[1].empty(),
-    "rate": stats_cols[2].empty(),
-    "speed": stats_cols[3].empty(),
-    "queue": stats_cols[4].empty()
-}
+scanned_metric = stats_cols[0].empty()
+found_metric = stats_cols[1].empty()
+rate_metric = stats_cols[2].empty()
+speed_metric = stats_cols[3].empty()
+queue_metric = stats_cols[4].empty()
 
-# Progress
 progress_bar = st.progress(0)
 status_text = st.empty()
-
-# Results
-results_container = st.container()
-
-# Export section
+results_container = st.empty()
 export_container = st.container()
-
-
-async def run_scan():
-    """Run the async scanner."""
-    filters = ScanFilters(
-        min_trophies=min_trophies,
-        max_trophies=max_trophies,
-        require_no_clan=True,
-        max_inactive_days=max_inactive,
-        only_french=only_french
-    )
-    
-    found_list = []
-    
-    def on_found(player: FoundPlayer):
-        found_list.append(player.to_dict())
-        st.session_state.players_found = found_list.copy()
-    
-    def on_stats(stats: ScanStats):
-        st.session_state.stats = stats
-        # Update UI
-        stats_placeholders["scanned"].metric("📊 Scannés", stats.scanned)
-        stats_placeholders["found"].metric("✅ Trouvés", stats.found)
-        stats_placeholders["rate"].metric("📈 Taux", f"{stats.success_rate:.1f}%")
-        stats_placeholders["speed"].metric("⚡ Vitesse", f"{stats.scans_per_minute:.0f}/min")
-        stats_placeholders["queue"].metric("📋 File", stats.queue_size)
-        
-        progress_bar.progress(min(stats.found / limit_recruits, 1.0))
-        status_text.text(f"Recherche en cours... {stats.found}/{limit_recruits} recrues trouvées")
-    
-    async with ClashRoyaleAPI(api_key, max_concurrent=concurrency) as api:
-        scanner = PlayerScanner(
-            api=api,
-            filters=filters,
-            on_player_found=on_found,
-            on_stats_update=on_stats,
-            batch_size=concurrency
-        )
-        
-        # Check periodically if we should stop
-        scan_task = asyncio.create_task(scanner.scan(seed_tag, limit_recruits))
-        
-        while not scan_task.done():
-            if not st.session_state.scanning:
-                scanner.stop()
-                break
-            await asyncio.sleep(0.1)
-        
-        try:
-            await scan_task
-        except:
-            pass
-    
-    st.session_state.scanning = False
-    return found_list
-
 
 # --- SCANNING LOGIC ---
 if st.session_state.scanning:
@@ -146,60 +124,110 @@ if st.session_state.scanning:
         st.error("Veuillez saisir votre clé API dans la barre latérale.")
         st.session_state.scanning = False
     else:
-        # Run async scan
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            results = loop.run_until_complete(run_scan())
-            st.session_state.players_found = [p.to_dict() if hasattr(p, 'to_dict') else p for p in results]
-        finally:
-            loop.close()
+        headers = get_headers(api_key)
+        session = requests.Session()
         
-        st.success(f"✨ Terminé ! {len(st.session_state.players_found)} recrues trouvées.")
+        queue = deque([seed_tag])
+        visited = {seed_tag}
+        found_count = 0
+        scanned_count = 0
+        start_time = time.time()
+        
+        while queue and st.session_state.scanning and found_count < limit_recruits:
+            # Get batch of tags to process
+            batch_tags = []
+            for _ in range(min(max_workers * 2, len(queue))):
+                if queue:
+                    batch_tags.append(queue.popleft())
+            
+            if not batch_tags:
+                break
+            
+            # Parallel fetch player details
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(get_player_detail, session, t, headers): t for t in batch_tags}
+                
+                for future in as_completed(futures):
+                    if not st.session_state.scanning or found_count >= limit_recruits:
+                        break
+                    
+                    tag = futures[future]
+                    p_data = future.result()
+                    scanned_count += 1
+                    
+                    if p_data:
+                        trophies = p_data.get('trophies', 0)
+                        has_clan = 'clan' in p_data
+                        
+                        # Check basic filters
+                        if not has_clan and min_trophies <= trophies <= max_trophies:
+                            # Check French filter
+                            is_fr = True
+                            if only_french:
+                                p_battles = get_battle_log(session, tag, headers)
+                                is_fr = is_french_relevance(p_battles)
+                            
+                            if is_fr:
+                                found_count += 1
+                                st.session_state.players_found.append({
+                                    "Tag": p_data['tag'],
+                                    "Nom": p_data.get('name', 'Unknown'),
+                                    "Trophées": trophies,
+                                    "Niveau": p_data.get('expLevel', 1),
+                                    "Lien": f"https://royaleapi.com/player/{p_data['tag'].replace('#', '')}"
+                                })
+                        
+                        # Get battle log for new tags
+                        battles = get_battle_log(session, tag, headers)
+                        for b in battles:
+                            for team in ['team', 'opponent']:
+                                for p in b.get(team, []):
+                                    new_tag = p.get('tag')
+                                    if new_tag and new_tag not in visited:
+                                        visited.add(new_tag)
+                                        queue.append(new_tag)
+                    
+                    # Update stats
+                    elapsed = max(0.1, (time.time() - start_time) / 60)
+                    scanned_metric.metric("📊 Scannés", scanned_count)
+                    found_metric.metric("✅ Trouvés", found_count)
+                    rate_metric.metric("📈 Taux", f"{(found_count/max(1,scanned_count)*100):.1f}%")
+                    speed_metric.metric("⚡ Vitesse", f"{scanned_count/elapsed:.0f}/min")
+                    queue_metric.metric("📋 File", len(queue))
+                    
+                    progress_bar.progress(min(found_count / limit_recruits, 1.0))
+                    status_text.text(f"🔍 Recherche... {found_count}/{limit_recruits} recrues")
+            
+            # Update display
+            if st.session_state.players_found:
+                df = pd.DataFrame(st.session_state.players_found)
+                results_container.dataframe(df, use_container_width=True, hide_index=True)
+        
+        st.session_state.scanning = False
+        st.success(f"✨ Terminé ! {found_count} recrues trouvées.")
         st.rerun()
 
 # --- DISPLAY RESULTS ---
-if st.session_state.players_found:
-    with results_container:
-        st.subheader(f"📋 Recrues trouvées ({len(st.session_state.players_found)})")
-        df = pd.DataFrame(st.session_state.players_found)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+if st.session_state.players_found and not st.session_state.scanning:
+    df = pd.DataFrame(st.session_state.players_found)
+    st.subheader(f"📋 Recrues trouvées ({len(st.session_state.players_found)})")
+    st.dataframe(df, use_container_width=True, hide_index=True)
     
     with export_container:
         st.subheader("💾 Exporter les résultats")
         col_csv, col_json, col_excel = st.columns(3)
         
-        # CSV Export
         with col_csv:
             csv_buffer = io.StringIO()
             df.to_csv(csv_buffer, index=False)
-            st.download_button(
-                "📥 Télécharger CSV",
-                csv_buffer.getvalue(),
-                file_name="recrues_clash.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.download_button("📥 CSV", csv_buffer.getvalue(), file_name="recrues.csv", mime="text/csv", use_container_width=True)
         
-        # JSON Export
         with col_json:
             json_str = json.dumps(st.session_state.players_found, ensure_ascii=False, indent=2)
-            st.download_button(
-                "📥 Télécharger JSON",
-                json_str,
-                file_name="recrues_clash.json",
-                mime="application/json",
-                use_container_width=True
-            )
+            st.download_button("📥 JSON", json_str, file_name="recrues.json", mime="application/json", use_container_width=True)
         
-        # Excel Export
         with col_excel:
             excel_buffer = io.BytesIO()
             df.to_excel(excel_buffer, index=False, engine='openpyxl')
-            st.download_button(
-                "📥 Télécharger Excel",
-                excel_buffer.getvalue(),
-                file_name="recrues_clash.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+            st.download_button("📥 Excel", excel_buffer.getvalue(), file_name="recrues.xlsx", 
+                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
