@@ -26,12 +26,6 @@ with st.sidebar:
     max_trophies = st.number_input("Trophées Max", value=15000, step=100)
     
     st.subheader("🔬 Filtres Avancés")
-    col1, col2 = st.columns(2)
-    with col1:
-        min_level = st.number_input("Niveau Min", value=1, min_value=1, max_value=50)
-    with col2:
-        max_level = st.number_input("Niveau Max", value=50, min_value=1, max_value=50)
-    
     max_inactive = st.number_input("Inactif max (jours)", value=30, min_value=1, max_value=365, 
                                    help="Joueurs actifs dans les X derniers jours")
     
@@ -97,8 +91,6 @@ async def run_scan():
         min_trophies=min_trophies,
         max_trophies=max_trophies,
         require_no_clan=True,
-        min_level=min_level if min_level > 1 else None,
-        max_level=max_level if max_level < 50 else None,
         max_inactive_days=max_inactive,
         only_french=only_french
     )
