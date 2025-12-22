@@ -42,11 +42,14 @@ if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 if 'errors' not in st.session_state:
     st.session_state.errors = 0
+if 'rate_limits' not in st.session_state:
+    st.session_state.rate_limits = 0
 
 def start_scanning():
     st.session_state.scanning = True
     st.session_state.players_found = []
     st.session_state.errors = 0
+    st.session_state.rate_limits = 0
 
 def stop_scanning():
     st.session_state.scanning = False
@@ -114,11 +117,12 @@ with col1:
 error_container = st.empty()
 
 # Statistiques en temps réel
-stats_cols = st.columns(4)
+stats_cols = st.columns(5)
 stat_scanned = stats_cols[0].empty()
 stat_found = stats_cols[1].empty()
 stat_errors = stats_cols[2].empty()
-stat_queue = stats_cols[3].empty()
+stat_rate_limit = stats_cols[3].empty()
+stat_queue = stats_cols[4].empty()
 
 results_container = st.empty()
 progress_bar = st.progress(0)
@@ -211,13 +215,22 @@ if st.session_state.scanning:
                             st.session_state.scanning = False
                             break
                         elif result["error"] == "rate_limit":
-                            error_container.warning("⚠️ Rate limit atteint - pause de 2 secondes...")
-                            time.sleep(2)
+                            st.session_state.rate_limits += 1
+                            
+                            # Si trop de rate limits, arrêter et prévenir
+                            if st.session_state.rate_limits >= 10:
+                                error_container.error("🚫 TROP DE REQUÊTES API ! Vous avez atteint la limite. Attendez quelques minutes avant de relancer.")
+                                st.session_state.scanning = False
+                                break
+                            else:
+                                error_container.warning(f"⚠️ Rate limit #{st.session_state.rate_limits} - pause de 3 secondes...")
+                                time.sleep(3)
                     
                     # Update stats
                     stat_scanned.metric("📊 Scannés", scanned_count)
                     stat_found.metric("✅ Trouvés", found_count)
                     stat_errors.metric("❌ Erreurs", error_count)
+                    stat_rate_limit.metric("🚫 Rate Limits", st.session_state.rate_limits)
                     stat_queue.metric("📋 File", len(queue))
                     
                     progress_bar.progress(min(found_count / limit_recruits, 1.0))
