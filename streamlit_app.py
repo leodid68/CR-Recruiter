@@ -20,7 +20,7 @@ with st.sidebar:
     limit = st.number_input("Nombre de joueurs à trouver", value=50, min_value=1, max_value=200)
     
     st.subheader("🌱 Point de départ")
-    seed_tag = st.text_input("Tag du joueur initial", value="#989R2RPQ", help="Le script commencera à fouiller à partir de ce joueur.")
+    seed_tag = st.text_input("Tag du joueur initial", value="#PL0Q8UGR", help="Le script commencera à fouiller à partir de ce joueur.")
 
 # --- Gestion des Stats API ---
 if 'api_stats' not in st.session_state:
