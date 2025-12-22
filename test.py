@@ -1,0 +1,207 @@
+import streamlit as st
+import requests
+import time
+import pandas as pd
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="CR Recruiter", page_icon="👑", layout="wide")
+st.title("👑 Clash Royale Recruiter")
+
+# --- SESSION STATE ---
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
+if 'found' not in st.session_state:
+    st.session_state.found = []
+
+def start_scan():
+    st.session_state.scanning = True
+    st.session_state.found = []
+
+def stop_scan():
+    st.session_state.scanning = False
+
+# --- SIDEBAR CONFIG ---
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    api_token = st.text_input("Clé API", type="password")
+    seed_tag = st.text_input("Tag Graine", value="#989R2RPQ")
+    
+    st.subheader("🎯 Filtres")
+    min_trophies = st.number_input("Trophées Min", value=7500, step=100)
+    max_trophies = st.number_input("Trophées Max", value=11000, step=100)
+    min_scan = st.number_input("Qualité Scan", value=7000, step=100)
+    objectif = st.number_input("Objectif Recrues", value=50, step=10)
+    
+    st.subheader("⚡ Performance")
+    workers = st.slider("Workers parallèles", 1, 10, 5)
+    
+    st.divider()
+    
+    # Boutons Start/Stop
+    col_start, col_stop = st.columns(2)
+    with col_start:
+        st.button("🚀 Lancer", on_click=start_scan, type="primary", use_container_width=True, disabled=st.session_state.scanning)
+    with col_stop:
+        st.button("🛑 Stop", on_click=stop_scan, type="secondary", use_container_width=True, disabled=not st.session_state.scanning)
+
+# --- API FUNCTIONS ---
+def get_headers():
+    return {"Authorization": f"Bearer {api_token}", "Accept": "application/json"}
+
+def get_battle_log(tag):
+    url = f"https://api.clashroyale.com/v1/players/{tag.replace('#', '%23')}/battlelog"
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except:
+        return []
+
+def get_player(tag):
+    url = f"https://api.clashroyale.com/v1/players/{tag.replace('#', '%23')}"
+    try:
+        r = requests.get(url, headers=get_headers(), timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except:
+        return None
+
+# --- TABS ---
+tab_scan, tab_stats = st.tabs(["🔍 Recherche", "📊 Statistiques"])
+
+with tab_scan:
+    # Métriques
+    col1, col2, col3 = st.columns(3)
+    metric_scanned = col1.empty()
+    metric_found = col2.empty()
+    metric_queue = col3.empty()
+    
+    log_area = st.empty()
+    results_area = st.empty()
+
+    # --- SNOWBALL LOGIC ---
+    if st.session_state.scanning:
+        if not api_token:
+            st.error("⚠️ Entrez votre clé API")
+            st.session_state.scanning = False
+        else:
+            queue = deque([seed_tag])
+            visited = {seed_tag}
+            found = []
+            scanned = 0
+            
+            metric_scanned.metric("🔍 Scannés", 0)
+            metric_found.metric("✅ Trouvés", 0)
+            metric_queue.metric("📋 File", 1)
+            log_area.info(f"Démarrage avec {workers} workers...")
+
+            while queue and len(found) < objectif and st.session_state.scanning:
+                current = queue.popleft()
+                battles = get_battle_log(current)
+                
+                # Collecter tous les tags
+                tags_to_check = []
+                for battle in battles:
+                    for opp in battle.get('opponent', []):
+                        tag = opp['tag']
+                        if tag not in visited:
+                            visited.add(tag)
+                            tags_to_check.append(tag)
+                
+                # Traitement PARALLELE
+                if tags_to_check and st.session_state.scanning:
+                    with ThreadPoolExecutor(max_workers=workers) as executor:
+                        futures = {executor.submit(get_player, tag): tag for tag in tags_to_check}
+                        
+                        for future in as_completed(futures):
+                            if len(found) >= objectif or not st.session_state.scanning:
+                                break
+                            
+                            tag = futures[future]
+                            scanned += 1
+                            
+                            try:
+                                player = future.result()
+                                if player:
+                                    trophies = player.get("trophies", 0)
+                                    has_clan = "clan" in player
+                                    
+                                    if not has_clan and min_trophies <= trophies <= max_trophies:
+                                        found.append({
+                                            "Nom": player["name"],
+                                            "Trophées": trophies,
+                                            "Tag": tag,
+                                            "Lien": f"https://royaleapi.com/player/{tag.replace('#','')}"
+                                        })
+                                    
+                                    if trophies >= min_scan:
+                                        queue.append(tag)
+                            except:
+                                pass
+                    
+                    # Update UI
+                    metric_scanned.metric("🔍 Scannés", scanned)
+                    metric_found.metric("✅ Trouvés", len(found))
+                    metric_queue.metric("📋 File", len(queue))
+                    
+                    if found:
+                        results_area.dataframe(found, use_container_width=True)
+                        st.session_state.found = found
+                
+                log_area.info(f"⏳ {scanned} profils analysés... (file: {len(queue)})")
+                time.sleep(0.05)
+            
+            st.session_state.scanning = False
+            st.session_state.found = found
+            
+            if found:
+                st.success(f"🎉 Terminé ! {len(found)} recrues trouvées.")
+                df = pd.DataFrame(found)
+                st.download_button("📥 Télécharger CSV", df.to_csv(index=False), "recrues.csv", "text/csv")
+            else:
+                st.warning("Aucune recrue trouvée.")
+
+    # Afficher résultats existants si on ne scanne pas
+    elif st.session_state.found:
+        results_area.dataframe(st.session_state.found, use_container_width=True)
+        df = pd.DataFrame(st.session_state.found)
+        st.download_button("📥 Télécharger CSV", df.to_csv(index=False), "recrues.csv", "text/csv")
+
+with tab_stats:
+    st.subheader("📊 Statistiques des Recrues")
+    
+    if st.session_state.found:
+        df = pd.DataFrame(st.session_state.found)
+        
+        # Métriques principales
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("📊 Total", len(df))
+        col2.metric("🏆 Moyenne", f"{df['Trophées'].mean():.0f}")
+        col3.metric("📈 Médiane", f"{df['Trophées'].median():.0f}")
+        col4.metric("⭐ Max", df['Trophées'].max())
+        
+        st.divider()
+        
+        # Histogramme par tranches de 250 trophées
+        st.subheader("Distribution des Trophées (par tranche de 250)")
+        
+        # Créer les bins de 9000 à 15500 par pas de 250
+        bins = list(range(9000, 15750, 250))
+        labels = [f"{b}-{b+249}" for b in bins[:-1]]
+        
+        df['Tranche'] = pd.cut(df['Trophées'], bins=bins, labels=labels, include_lowest=True)
+        distribution = df['Tranche'].value_counts().sort_index()
+        
+        st.bar_chart(distribution)
+        
+        # Stats détaillées
+        st.subheader("Détails")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("Min", df['Trophées'].min())
+            st.metric("Écart-type", f"{df['Trophées'].std():.0f}")
+        with col_b:
+            st.metric("Q1 (25%)", f"{df['Trophées'].quantile(0.25):.0f}")
+            st.metric("Q3 (75%)", f"{df['Trophées'].quantile(0.75):.0f}")
+    else:
+        st.info("Lancez une recherche pour voir les statistiques.")
