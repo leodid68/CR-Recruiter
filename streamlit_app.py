@@ -1,230 +1,130 @@
-import streamlit as st
 import requests
 import time
-import pandas as pd
 from collections import deque
 
-# Configuration de la page
-st.set_page_config(page_title="Clash Royale Recruiter", page_icon="⚔️", layout="wide")
+# --- CONFIGURATION ---
+# REMPLACEZ CECI PAR VOTRE NOUVELLE CLÉ (celle postée est compromise)
+API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6ImJlYzUzMzc0LTg1MmEtNDgzMS05NmYxLTYxMDA5ZjU1Y2ZmMSIsImlhdCI6MTc2NjM5OTY2Nywic3ViIjoiZGV2ZWxvcGVyLzQzMGFmNGE1LWYzYjQtMGQzOS1iOWIyLTljZGFmMGNiYzlhMyIsInNjb3BlcyI6WyJyb3lhbGUiXSwibGltaXRzIjpbeyJ0aWVyIjoiZGV2ZWxvcGVyL3NpbHZlciIsInR5cGUiOiJ0aHJvdHRsaW5nIn0seyJjaWRycyI6WyIxNzYuMTcwLjY5LjIwNCJdLCJ0eXBlIjoiY2xpZW50In1dfQ.YnJQOep4EeaZoSVsNfGG9kbLlkdbiME0H_q7FIiaoGHCD3Y39v1HqfqYZ7q05bB6OPzjssSSMeDQ86WUTwuooQ"
+BASE_URL = "https://api.clashroyale.com/v1"
 
-st.title("⚔️ Recruteur Clash Royale")
-st.markdown("Trouvez des joueurs **sans clan** en explorant l'historique des combats.")
+# Le point de départ
+SEED_PLAYER_TAG = "#989R2RPQ"
 
-# --- Sidebar : Configuration ---
-with st.sidebar:
-    st.header("⚙️ Paramètres")
-    api_key = st.text_input("Clé API Clash Royale", type="password", help="Créez une clé sur https://developer.clashroyale.com")
-    
-    st.subheader("🎯 Cible")
-    min_trophies = st.number_input("Trophées minimum", value=5000, step=100)
-    limit = st.number_input("Nombre de joueurs à trouver", value=50, min_value=1, max_value=200)
-    
-    st.subheader("🌱 Point de départ")
-    seed_tag = st.text_input("Tag du joueur initial", value="#PL0Q8UGR", help="Le script commencera à fouiller à partir de ce joueur.")
+# Filtres de recrutement (Ce qu'on cherche)
+MIN_TROPHIES = 7500
+MAX_TROPHIES = 11000
 
-# --- Gestion des Stats API ---
-if 'api_stats' not in st.session_state:
-    st.session_state.api_stats = {
-        'requests': 0,
-        'success': 0,
-        'rate_limits': 0,
-        'errors': 0
-    }
+# Filtre de "qualité de scan" 
+# Pour éviter de scanner des joueurs trop faibles qui polluent la recherche,
+# on ajoute à la file d'attente seulement les joueurs au dessus de ce score :
+MIN_TROPHIES_TO_SCAN = 7000 
 
-def update_stats(status_code):
-    st.session_state.api_stats['requests'] += 1
-    if status_code == 200:
-        st.session_state.api_stats['success'] += 1
-    elif status_code == 429:
-        st.session_state.api_stats['rate_limits'] += 1
-    else:
-        st.session_state.api_stats['errors'] += 1
+headers = {
+    "Authorization": f"Bearer {API_TOKEN}",
+    "Accept": "application/json"
+}
 
-def reset_stats():
-    st.session_state.api_stats = {
-        'requests': 0,
-        'success': 0,
-        'rate_limits': 0,
-        'errors': 0
-    }
+# --- FONCTIONS API ---
 
-# --- Fonctions API ---
-def get_headers(api_key):
-    return {"Authorization": f"Bearer {api_key}"}
-
-def clean_tag(tag):
-    return tag.replace("#", "").upper()
-
-def get_player(tag, api_key):
-    url = f"https://api.clashroyale.com/v1/players/%23{clean_tag(tag)}"
+def get_battle_log(player_tag):
+    """Récupère les derniers combats"""
+    clean_tag = player_tag.replace("#", "%23")
+    url = f"{BASE_URL}/players/{clean_tag}/battlelog"
     try:
-        response = requests.get(url, headers=get_headers(api_key), timeout=5)
-        update_stats(response.status_code)
-        
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json()
-        elif response.status_code == 429:
-            time.sleep(1) # Petit temps d'attente si rate limit
-            return None
-        return None
+        return []
     except:
-        st.session_state.api_stats['errors'] += 1
-        return None
+        return []
 
-def get_battle_log(tag, api_key):
-    url = f"https://api.clashroyale.com/v1/players/%23{clean_tag(tag)}/battlelog"
+def get_player_detail(player_tag):
+    """Récupère les détails précis"""
+    clean_tag = player_tag.replace("#", "%23")
+    url = f"{BASE_URL}/players/{clean_tag}"
     try:
-        response = requests.get(url, headers=get_headers(api_key), timeout=5)
-        update_stats(response.status_code)
-        
+        response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             return response.json()
-        
-        # Si rate limit sur battlelog, on attend aussi
-        if response.status_code == 429:
-             time.sleep(1)
-             
-        return []
+        return None
     except:
-        st.session_state.api_stats['errors'] += 1
-        return []
+        return None
 
-# --- État de l'application ---
-if 'found_players' not in st.session_state:
-    st.session_state.found_players = []
-if 'scanning' not in st.session_state:
-    st.session_state.scanning = False
+# --- MOTEUR SNOWBALL ---
 
-def toggle_scan():
-    st.session_state.scanning = not st.session_state.scanning
-    if st.session_state.scanning:
-        # Reset si on relance une recherche propre
-        if len(st.session_state.found_players) >= limit:
-             st.session_state.found_players = []
-             reset_stats()
-
-# --- Interface Principale ---
-# --- Interface Principale ---
-btn_label = "🛑 Arrêter la recherche" if st.session_state.scanning else "🚀 Lancer la recherche"
-st.button(btn_label, on_click=toggle_scan, type="primary", use_container_width=True)
-
-# Affichage des Stats API
-stats_container = st.container()
-with stats_container:
-    cols = st.columns(4)
-    cols[0].metric("🌐 Requêtes Total", st.session_state.api_stats['requests'])
-    cols[1].metric("✅ Succès", st.session_state.api_stats['success'])
-    cols[2].metric("⚠️ Rate Limits (429)", st.session_state.api_stats['rate_limits'], 
-                   delta_color="inverse" if st.session_state.api_stats['rate_limits'] > 0 else "normal")
-    cols[3].metric("❌ Erreurs", st.session_state.api_stats['errors'],
-                   delta_color="inverse" if st.session_state.api_stats['errors'] > 0 else "normal")
-
-status_container = st.empty()
-results_container = st.empty()
-progress_bar = st.empty()
-
-# --- Logique de Scan ---
-if st.session_state.scanning:
-    if not api_key:
-        st.error("⚠️ Veuillez entrer une clé API valide dans la barre latérale.")
-        st.session_state.scanning = False
-    else:
-        # Initialisation
-        queue = deque([seed_tag])
-        visited = {seed_tag}
-        scanned_count = 0
-        
-        status_container.info(f"🔍 Démarrage de l'analyse via {seed_tag}...")
-        
-        while queue and st.session_state.scanning and len(st.session_state.found_players) < limit:
-            current_tag = queue.popleft()
-            
-            # --- 1. ANALYSE DU JOUEUR (Est-ce une recrue ?) ---
-            player_data = get_player(current_tag, api_key)
-            scanned_count += 1
-            
-            if player_data:
-                # Critères : Pas de clan ET Trophées suffisants
-                has_clan = 'clan' in player_data
-                trophies = player_data.get('trophies', 0)
-                
-                if not has_clan and trophies >= min_trophies:
-                    st.session_state.found_players.append({
-                        "Tag": player_data['tag'],
-                        "Nom": player_data['name'],
-                        "Trophées": trophies,
-                        "Niveau": player_data.get('expLevel', '?'),
-                        "Lien": f"https://royaleapi.com/player/{clean_tag(player_data['tag'])}"
-                    })
-            
-            # --- 2. EFFET BOULE DE NEIGE (On cherche de nouveaux joueurs via son historique) ---
-            battles = get_battle_log(current_tag, api_key)
-            
-            # DEBUG
-            if not battles and st.session_state.api_stats['rate_limits'] > 5:
-                 status_container.warning(f"⚠️ Trop de Rate Limits ! L'API bloque les requêtes. Pause nécessaire.")
-
-            for battle in battles:
-                # Récupérer tous les participants (équipe et adversaires)
-                participants = battle.get('team', []) + battle.get('opponent', [])
-                for p in participants:
-                    p_tag = p.get('tag')
-                    if p_tag and p_tag not in visited:
-                        visited.add(p_tag)
-                        queue.append(p_tag)
-            
-            # Mise à jour de l'affichage
-            found_count = len(st.session_state.found_players)
-            
-            # Update metrics directly in the loop to allow live view
-            with stats_container:
-                 # Hack to force refresh of metrics without full rerun (Streamlit quirks)
-                 # But standard rerun loop handles this usually. 
-                 # We rely on the implicit cycle.
-                 pass
-
-            status_container.markdown(f"""
-                **État de la recherche :**
-                - 🕵️ Joueurs scannés : `{scanned_count}`
-                - 📥 File d'attente : `{len(queue)}`
-                - ✅ **Trouvés : {found_count} / {limit}**
-            """)
-            
-            if found_count > 0:
-                progress_bar.progress(min(found_count / limit, 1.0))
-                df = pd.DataFrame(st.session_state.found_players)
-                results_container.dataframe(
-                    df, 
-                    column_config={"Lien": st.column_config.LinkColumn("Profil RoyaleAPI")},
-                    use_container_width=True
-                )
-
-            # Petit délai pour éviter de spammer l'API
-            time.sleep(0.1)
-        
-        if len(st.session_state.found_players) >= limit:
-            st.success("🎉 Recherche terminée ! Objectif atteint.")
-            st.session_state.scanning = False
-        elif not queue:
-            st.warning("Plus de joueurs trouvés dans le réseau exploré.")
-            st.session_state.scanning = False
-
-# --- Affichage Final & Export ---
-if not st.session_state.scanning and st.session_state.found_players:
-    st.divider()
-    st.subheader("📋 Résultats Finaux")
-    df = pd.DataFrame(st.session_state.found_players)
-    st.dataframe(
-        df, 
-        column_config={"Lien": st.column_config.LinkColumn("Profil RoyaleAPI")},
-        use_container_width=True
-    )
+def start_snowball(seed_tag):
+    # La file d'attente (FIFO - First In First Out)
+    scan_queue = deque([seed_tag])
     
-    # Export CSV
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Télécharger la liste (CSV)",
-        data=csv,
-        file_name="recrues_sans_clan.csv",
-        mime="text/csv",
-    )
+    # Mémoire cache pour ne pas scanner deux fois le même joueur
+    visited_tags = set([seed_tag])
+    
+    found_count = 0
+    scanned_count = 0
+
+    print(f"🚀 Démarrage du Snowball à partir de {seed_tag}...")
+    print(f"🎯 Cible : {MIN_TROPHIES} - {MAX_TROPHIES} trophées sans clan.")
+    print("-" * 50)
+
+    while len(scan_queue) > 0:
+        # 1. On prend le prochain joueur dans la file
+        current_tag = scan_queue.popleft()
+        
+        # Petit affichage de progression
+        # print(f"🔍 Scan du journal de {current_tag} (File d'attente: {len(scan_queue)})")
+
+        battles = get_battle_log(current_tag)
+        
+        # Pour chaque combat dans son historique
+        for battle in battles:
+            opponents = battle.get('opponent', [])
+            
+            for opp in opponents:
+                opp_tag = opp['tag']
+
+                # Si on ne connait pas ce joueur, on l'analyse
+                if opp_tag not in visited_tags:
+                    visited_tags.add(opp_tag) # On le marque comme "vu"
+                    
+                    player_data = get_player_detail(opp_tag)
+                    scanned_count += 1
+                    
+                    if player_data:
+                        trophies = player_data.get("trophies", 0)
+                        has_clan = "clan" in player_data
+                        name = player_data.get("name", "Unknown")
+
+                        # --- VERIFICATION : EST-CE UNE RECRUE POTENTIELLE ? ---
+                        if not has_clan and MIN_TROPHIES <= trophies <= MAX_TROPHIES:
+                            found_count += 1
+                            print(f"✅ [{found_count}] RECRUE TROUVÉE !")
+                            print(f"   Nom: {name} | Trophées: {trophies}")
+                            print(f"   Tag: {opp_tag}")
+                            print(f"   🔗 https://royaleapi.com/player/{opp_tag.replace('#', '')}")
+                            print("-" * 30)
+                        
+                        # --- LOGIQUE DE CASCADE ---
+                        # Si le joueur a un bon niveau (même s'il a un clan), 
+                        # on l'ajoute à la file pour scanner SES adversaires plus tard.
+                        # Cela permet de rester dans le "Haut Ladder".
+                        if trophies >= MIN_TROPHIES_TO_SCAN:
+                            scan_queue.append(opp_tag)
+                            # print(f"   -> Ajouté à la file (niv {trophies})")
+                    
+                    # Pause très courte pour respecter l'API (Rate Limit)
+                    time.sleep(0.05)
+
+        # Pause entre chaque scan de journal de combat complet
+        time.sleep(0.1)
+
+        # Sécurité anti-crash si la liste devient vide (peu probable en haut niveau)
+        if len(scan_queue) == 0:
+            print("File d'attente vide. Fin du scan.")
+            break
+
+# --- LANCEMENT ---
+if __name__ == "__main__":
+    try:
+        start_snowball(SEED_PLAYER_TAG)
+    except KeyboardInterrupt:
+        print("\n🛑 Script arrêté par l'utilisateur.")
