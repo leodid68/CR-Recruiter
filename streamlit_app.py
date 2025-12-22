@@ -40,10 +40,13 @@ if 'players_found' not in st.session_state:
     st.session_state.players_found = []
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
+if 'errors' not in st.session_state:
+    st.session_state.errors = 0
 
 def start_scanning():
     st.session_state.scanning = True
     st.session_state.players_found = []
+    st.session_state.errors = 0
 
 def stop_scanning():
     st.session_state.scanning = False
@@ -61,39 +64,40 @@ def get_player_detail(session, player_tag, headers):
     clean_tag = player_tag.replace("#", "%23")
     url = f"{BASE_URL}/players/{clean_tag}"
     try:
-        resp = session.get(url, headers=headers, timeout=5)
+        resp = session.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
-            return resp.json()
-        return None
-    except:
-        return None
+            return {"success": True, "data": resp.json()}
+        elif resp.status_code == 429:
+            time.sleep(2)  # Rate limit - attendre 2 secondes
+            return {"success": False, "error": "rate_limit"}
+        elif resp.status_code == 403:
+            return {"success": False, "error": "api_key_invalid"}
+        else:
+            return {"success": False, "error": f"status_{resp.status_code}"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 def get_battle_log(session, player_tag, headers):
     clean_tag = player_tag.replace("#", "%23")
     url = f"{BASE_URL}/players/{clean_tag}/battlelog"
     try:
-        resp = session.get(url, headers=headers, timeout=5)
+        resp = session.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             return resp.json()
+        elif resp.status_code == 429:
+            time.sleep(2)
+            return get_battle_log(session, player_tag, headers)
         return []
     except:
         return []
 
 def is_french_relevance(battle_log):
-    """
-    Vérifie si le joueur semble être dans la sphère française.
-    On regarde la localisation des clans de ses adversaires ou coéquipiers.
-    Code France dans l'API : 57000087
-    """
     fr_signals = 0
     for battle in battle_log:
-        # Check opponent clan
         opponents = battle.get('opponent', [])
         for opp in opponents:
             clan = opp.get('clan')
             if clan:
-                # Malheureusement le battlelog court ne donne pas la localisation du clan
-                # mais on peut filtrer par les noms de clans contenant "FR", "France", etc.
                 clan_name = clan.get('name', '').lower()
                 if any(x in clan_name for x in ["fr ", " fr", "france", "français"]):
                     fr_signals += 1
@@ -106,16 +110,28 @@ with col1:
     st.button("🚀 Lancer la recherche", use_container_width=True, disabled=st.session_state.scanning, on_click=start_scanning)
     st.button("🛑 Arrêter", use_container_width=True, disabled=not st.session_state.scanning, on_click=stop_scanning)
 
+# Zone d'erreurs
+error_container = st.empty()
+
+# Statistiques en temps réel
+stats_cols = st.columns(4)
+stat_scanned = stats_cols[0].empty()
+stat_found = stats_cols[1].empty()
+stat_errors = stats_cols[2].empty()
+stat_queue = stats_cols[3].empty()
+
 results_container = st.empty()
 progress_bar = st.progress(0)
 status_text = st.empty()
+
+# Zone de statistiques sur les joueurs trouvés
+player_stats_container = st.container()
 
 if st.session_state.scanning:
     if not api_key:
         st.error("Veuillez saisir votre clé API dans la barre latérale.")
         st.session_state.scanning = False
     else:
-        
         headers = get_headers(api_key)
         session = requests.Session()
         
@@ -123,13 +139,13 @@ if st.session_state.scanning:
         visited = {seed_tag}
         found_count = 0
         scanned_count = 0
+        error_count = 0
         
         # Préparation du CSV
         csv_filename = "recrues_clash_streamlit.csv"
-        # Utilisation de la virgule pour éviter le ParserError
         with open(csv_filename, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(["Tag", "Nom", "Trophées", "Lien RoyaleAPI"])
+            writer.writerow(["Tag", "Nom", "Trophées", "Niveau", "Lien RoyaleAPI"])
 
         while queue and st.session_state.scanning and found_count < limit_recruits:
             current_tag = queue.popleft()
@@ -147,28 +163,26 @@ if st.session_state.scanning:
             if not new_tags:
                 continue
             
-            # Correction : on ajoute les nouveaux tags à la file pour continuer la recherche
             queue.extend(new_tags)
                 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(get_player_detail, session, t, headers): t for t in new_tags}
                 for future in as_completed(futures):
-                    if not st.session_state.scanning: break
+                    if not st.session_state.scanning: 
+                        break
                     
-                    p_data = future.result()
+                    result = future.result()
                     scanned_count += 1
                     
-                    if p_data:
+                    if result["success"]:
+                        p_data = result["data"]
                         trophies = p_data.get('trophies', 0)
                         has_clan = 'clan' in p_data
+                        level = p_data.get('expLevel', 1)
                         
-                        # Filtre de base
                         if not has_clan and min_trophies <= trophies <= max_trophies:
-                            
-                            # Filtre Français (optionnel)
                             is_fr = True
                             if only_french:
-                                # On récupère son battle log pour checker la pertinence FR
                                 p_battles = get_battle_log(session, p_data['tag'], headers)
                                 is_fr = is_french_relevance(p_battles)
                             
@@ -180,39 +194,66 @@ if st.session_state.scanning:
                                     "Tag": p_tag,
                                     "Nom": p_name,
                                     "Trophées": trophies,
+                                    "Niveau": level,
                                     "Lien": f"https://royaleapi.com/player/{p_tag.replace('#', '')}"
                                 })
                                 
-                                # Sauvegarde CSV
                                 with open(csv_filename, 'a', newline='', encoding='utf-8') as f:
                                     writer = csv.writer(f)
-                                    writer.writerow([p_tag, p_name, trophies, f"https://royaleapi.com/player/{p_tag.replace('#', '')}"])
-                                
-                    # Update UI
-                    status_text.text(f"Scannés: {scanned_count} | Trouvés: {found_count}/{limit_recruits}")
+                                    writer.writerow([p_tag, p_name, trophies, level, f"https://royaleapi.com/player/{p_tag.replace('#', '')}"])
+                    else:
+                        error_count += 1
+                        st.session_state.errors = error_count
+                        
+                        # Afficher l'erreur si c'est un problème de clé API
+                        if result["error"] == "api_key_invalid":
+                            error_container.error("❌ Clé API invalide ou expirée. Veuillez en créer une nouvelle.")
+                            st.session_state.scanning = False
+                            break
+                        elif result["error"] == "rate_limit":
+                            error_container.warning("⚠️ Rate limit atteint - pause de 2 secondes...")
+                            time.sleep(2)
+                    
+                    # Update stats
+                    stat_scanned.metric("📊 Scannés", scanned_count)
+                    stat_found.metric("✅ Trouvés", found_count)
+                    stat_errors.metric("❌ Erreurs", error_count)
+                    stat_queue.metric("📋 File", len(queue))
+                    
                     progress_bar.progress(min(found_count / limit_recruits, 1.0))
+                    status_text.text(f"Recherche en cours... {found_count}/{limit_recruits}")
                     
                     if found_count >= limit_recruits:
                         st.session_state.scanning = False
                         break
             
             # Affichage en temps réel
-            df = pd.DataFrame(st.session_state.players_found)
-            results_container.dataframe(df, use_container_width=True)
+            if st.session_state.players_found:
+                df = pd.DataFrame(st.session_state.players_found)
+                results_container.dataframe(df, use_container_width=True)
             
-            # Pause pour rate limit
             time.sleep(0.1)
 
         st.session_state.scanning = False
         if found_count >= limit_recruits:
             st.success(f"Terminé ! {found_count} recrues trouvées.")
-            with open(csv_filename, 'rb') as f:
-                st.download_button("📥 Télécharger le CSV", f, file_name=csv_filename, mime="text/csv")
 
 # Affichage permanent si pas en train de scanner
 if not st.session_state.scanning and st.session_state.players_found:
     df = pd.DataFrame(st.session_state.players_found)
+    
+    # Statistiques sur les joueurs trouvés
+    with player_stats_container:
+        st.subheader("📈 Statistiques des recrues")
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+        col_s1.metric("🏆 Trophées moyen", f"{df['Trophées'].mean():.0f}")
+        col_s2.metric("🏆 Trophées max", df['Trophées'].max())
+        col_s3.metric("🏆 Trophées min", df['Trophées'].min())
+        col_s4.metric("⭐ Niveau moyen", f"{df['Niveau'].mean():.1f}")
+    
+    st.subheader(f"📋 Recrues trouvées ({len(df)})")
     results_container.dataframe(df, use_container_width=True)
+    
     if os.path.exists("recrues_clash_streamlit.csv"):
         with open("recrues_clash_streamlit.csv", 'rb') as f:
             st.download_button("📥 Télécharger le CSV final", f, file_name="recrues_clash_streamlit.csv", mime="text/csv")
