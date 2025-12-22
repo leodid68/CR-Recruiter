@@ -14,18 +14,53 @@ if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 if 'found' not in st.session_state:
     st.session_state.found = []
+if 'last_notified' not in st.session_state:
+    st.session_state.last_notified = 0
 
 def start_scan():
     st.session_state.scanning = True
     st.session_state.found = []
+    st.session_state.last_notified = 0
 
 def stop_scan():
     st.session_state.scanning = False
 
+# --- TELEGRAM ---
+def send_telegram(bot_token, chat_id, players):
+    """Envoie une liste de joueurs via Telegram avec liens CR"""
+    if not bot_token or not chat_id:
+        return False
+    
+    message = "🎯 *Nouvelles Recrues CR !*\n"
+    message += "━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, p in enumerate(players, 1):
+        clean_tag = p['Tag'].replace('#', '')
+        message += f"*{i}. {p['Nom']}*\n"
+        message += f"   🏆 {p['Trophées']} (Best: {p.get('Best', 'N/A')})\n"
+        message += f"   🃏 {p.get('Carte Fav', 'N/A')}\n"
+        message += f"   📅 Actif: {p.get('Dernière Partie', 'N/A')}\n"
+        message += f"   [👤 Profil RoyaleAPI](https://royaleapi.com/player/{clean_tag})\n"
+        message += "──────────────────\n"
+    
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    data = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    
+    try:
+        r = requests.post(url, data=data, timeout=10)
+        return r.status_code == 200
+    except:
+        return False
+
 # --- SIDEBAR CONFIG ---
 with st.sidebar:
     st.header("⚙️ Configuration")
-    api_token = st.text_input("Clé API", type="password")
+    api_token = st.text_input("Clé API CR", type="password")
     seed_tag = st.text_input("Tag Graine", value="#989R2RPQ")
     
     st.subheader("🎯 Filtres")
@@ -36,6 +71,14 @@ with st.sidebar:
     
     st.subheader("⚡ Performance")
     workers = st.slider("Workers parallèles", 1, 10, 5)
+    
+    st.divider()
+    
+    # --- TELEGRAM CONFIG ---
+    st.subheader("📱 Telegram")
+    telegram_token = st.text_input("Bot Token", value="8532137772:AAGcnzo6D5rDleWEc0hPb-BdlS4lg1hrBF8", type="password")
+    telegram_chat_id = st.text_input("Chat ID", value="-5090698762")
+    telegram_batch = st.number_input("Notifier tous les X joueurs", value=20, min_value=5, step=5)
     
     st.divider()
     
@@ -71,10 +114,11 @@ tab_scan, tab_stats = st.tabs(["🔍 Recherche", "📊 Statistiques"])
 
 with tab_scan:
     # Métriques
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     metric_scanned = col1.empty()
     metric_found = col2.empty()
     metric_queue = col3.empty()
+    metric_telegram = col4.empty()
     
     log_area = st.empty()
     results_area = st.empty()
@@ -93,7 +137,10 @@ with tab_scan:
             metric_scanned.metric("🔍 Scannés", 0)
             metric_found.metric("✅ Trouvés", 0)
             metric_queue.metric("📋 File", 1)
+            metric_telegram.metric("📱 Notifs", 0)
             log_area.info(f"Démarrage avec {workers} workers...")
+
+            notif_count = 0
 
             while queue and len(found) < objectif and st.session_state.scanning:
                 current = queue.popleft()
@@ -127,12 +174,43 @@ with tab_scan:
                                     has_clan = "clan" in player
                                     
                                     if not has_clan and min_trophies <= trophies <= max_trophies:
+                                        clean_tag = tag.replace('#', '')
+                                        
+                                        # Données supplémentaires
+                                        best_trophies = player.get("bestTrophies", 0)
+                                        fav_card = player.get("currentFavouriteCard", {}).get("name", "N/A")
+                                        
+                                        # Récupérer la date du dernier combat
+                                        player_battles = get_battle_log(tag)
+                                        if player_battles:
+                                            last_battle = player_battles[0].get("battleTime", "N/A")
+                                            # Format: 20231222T153500.000Z -> 2023-12-22
+                                            if last_battle != "N/A":
+                                                last_battle = f"{last_battle[0:4]}-{last_battle[4:6]}-{last_battle[6:8]}"
+                                        else:
+                                            last_battle = "N/A"
+                                        
                                         found.append({
                                             "Nom": player["name"],
                                             "Trophées": trophies,
+                                            "Best": best_trophies,
+                                            "Carte Fav": fav_card,
+                                            "Dernière Partie": last_battle,
                                             "Tag": tag,
-                                            "Lien": f"https://royaleapi.com/player/{tag.replace('#','')}"
+                                            "Lien CR": f"clashroyale://playerInfo%3Fid={clean_tag}",
+                                            "RoyaleAPI": f"https://royaleapi.com/player/{clean_tag}"
                                         })
+                                        
+                                        # Telegram notification tous les X joueurs
+                                        if telegram_chat_id and len(found) >= st.session_state.last_notified + telegram_batch:
+                                            batch_start = st.session_state.last_notified
+                                            batch_end = len(found)
+                                            players_to_send = found[batch_start:batch_end]
+                                            
+                                            if send_telegram(telegram_token, telegram_chat_id, players_to_send):
+                                                notif_count += 1
+                                                st.session_state.last_notified = batch_end
+                                                metric_telegram.metric("📱 Notifs", notif_count)
                                     
                                     if trophies >= min_scan:
                                         queue.append(tag)
@@ -153,6 +231,11 @@ with tab_scan:
             
             st.session_state.scanning = False
             st.session_state.found = found
+            
+            # Envoyer les derniers joueurs restants
+            if telegram_chat_id and len(found) > st.session_state.last_notified:
+                remaining = found[st.session_state.last_notified:]
+                send_telegram(telegram_token, telegram_chat_id, remaining)
             
             if found:
                 st.success(f"🎉 Terminé ! {len(found)} recrues trouvées.")
