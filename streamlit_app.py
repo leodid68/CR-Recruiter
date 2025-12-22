@@ -104,10 +104,9 @@ def toggle_scan():
              reset_stats()
 
 # --- Interface Principale ---
-col1, col2 = st.columns([1, 4])
-with col1:
-    btn_label = "🛑 Arrêter" if st.session_state.scanning else "🚀 Lancer la recherche"
-    st.button(btn_label, on_click=toggle_scan, use_container_width=True)
+# --- Interface Principale ---
+btn_label = "🛑 Arrêter la recherche" if st.session_state.scanning else "🚀 Lancer la recherche"
+st.button(btn_label, on_click=toggle_scan, type="primary", use_container_width=True)
 
 # Affichage des Stats API
 stats_container = st.container()
