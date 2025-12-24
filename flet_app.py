@@ -307,6 +307,7 @@ def main(page: ft.Page):
         rows=[],
     )
     clan_progress = ft.ProgressBar(visible=False, width=400)
+    clan_analytics = ft.Column([], scroll=ft.ScrollMode.AUTO)
     
     def load_clan(e):
         nonlocal api, clan_members
@@ -379,13 +380,97 @@ def main(page: ft.Page):
             total_trophies = sum(m['Trophées'] for m in clan_members)
             avg_trophies = total_trophies // len(clan_members) if clan_members else 0
             total_dons = sum(m['Dons'] for m in clan_members)
-            inactive = len([m for m in clan_members if '⚫' in m['Statut'] or '🔴' in m['Statut']])
+            avg_dons = total_dons // len(clan_members) if clan_members else 0
+            inactive_list = [m for m in clan_members if '⚫' in m['Statut'] or '🔴' in m['Statut']]
+            zero_dons_list = [m for m in clan_members if m['Dons'] == 0]
+            top_donors = sorted(clan_members, key=lambda x: x['Dons'], reverse=True)[:5]
             
             clan_stats.controls = [
-                ft.Container(ft.Column([ft.Text("👥"), ft.Text(f"{len(clan_members)}/50", weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.BLUE_900, padding=15, border_radius=10),
-                ft.Container(ft.Column([ft.Text("🏆 Moy"), ft.Text(str(avg_trophies), weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.AMBER_900, padding=15, border_radius=10),
-                ft.Container(ft.Column([ft.Text("💝 Dons"), ft.Text(str(total_dons), weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.GREEN_900, padding=15, border_radius=10),
-                ft.Container(ft.Column([ft.Text("🔴 Inactifs"), ft.Text(str(inactive), weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.RED_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("👥 Membres"), ft.Text(f"{len(clan_members)}/50", size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.BLUE_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("🏆 Trophées Moy"), ft.Text(str(avg_trophies), size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.AMBER_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("💝 Dons Total"), ft.Text(str(total_dons), size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.GREEN_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("📊 Dons Moy"), ft.Text(str(avg_dons), size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.TEAL_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("🔴 Inactifs 7j+"), ft.Text(str(len(inactive_list)), size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.RED_900, padding=15, border_radius=10),
+                ft.Container(ft.Column([ft.Text("⚠️ 0 Dons"), ft.Text(str(len(zero_dons_list)), size=20, weight=ft.FontWeight.BOLD)], horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor=ft.Colors.ORANGE_900, padding=15, border_radius=10),
+            ]
+            
+            # --- DETAILED ANALYTICS ---
+            # Top 5 Donors Table
+            top_donors_table = ft.DataTable(
+                columns=[ft.DataColumn(ft.Text("Rang")), ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Dons")), ft.DataColumn(ft.Text("Rôle"))],
+                rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(f"#{i+1}")), ft.DataCell(ft.Text(d['Nom'])), ft.DataCell(ft.Text(str(d['Dons']))), ft.DataCell(ft.Text(d['Rôle']))]) for i, d in enumerate(top_donors)]
+            )
+            
+            # Zero Donors Table
+            zero_dons_table = ft.DataTable(
+                columns=[ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Trophées")), ft.DataColumn(ft.Text("Statut"))],
+                rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(z['Nom'])), ft.DataCell(ft.Text(str(z['Trophées']))), ft.DataCell(ft.Text(z['Statut']))]) for z in zero_dons_list[:10]]
+            )
+            
+            # Inactive Members Table
+            inactive_table = ft.DataTable(
+                columns=[ft.DataColumn(ft.Text("Nom")), ft.DataColumn(ft.Text("Dernière Partie")), ft.DataColumn(ft.Text("Dons")), ft.DataColumn(ft.Text("Rôle"))],
+                rows=[ft.DataRow(cells=[ft.DataCell(ft.Text(i['Nom'])), ft.DataCell(ft.Text(i['Dernière Partie'])), ft.DataCell(ft.Text(str(i['Dons']))), ft.DataCell(ft.Text(i['Rôle']))]) for i in inactive_list[:10]]
+            )
+            
+            # Donation distribution bars
+            don_ranges = {"0": 0, "1-10": 0, "11-50": 0, "51-100": 0, "100+": 0}
+            for m in clan_members:
+                d = m['Dons']
+                if d == 0: don_ranges["0"] += 1
+                elif d <= 10: don_ranges["1-10"] += 1
+                elif d <= 50: don_ranges["11-50"] += 1
+                elif d <= 100: don_ranges["51-100"] += 1
+                else: don_ranges["100+"] += 1
+            
+            don_bars = ft.Row([
+                ft.Column([
+                    ft.Container(height=don_ranges["0"]*10, width=40, bgcolor=ft.Colors.RED_700, border_radius=5),
+                    ft.Text("0", size=12)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Column([
+                    ft.Container(height=don_ranges["1-10"]*10, width=40, bgcolor=ft.Colors.ORANGE_700, border_radius=5),
+                    ft.Text("1-10", size=12)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Column([
+                    ft.Container(height=don_ranges["11-50"]*10, width=40, bgcolor=ft.Colors.YELLOW_700, border_radius=5),
+                    ft.Text("11-50", size=12)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Column([
+                    ft.Container(height=don_ranges["51-100"]*10, width=40, bgcolor=ft.Colors.LIME_700, border_radius=5),
+                    ft.Text("51-100", size=12)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Column([
+                    ft.Container(height=don_ranges["100+"]*10, width=40, bgcolor=ft.Colors.GREEN_700, border_radius=5),
+                    ft.Text("100+", size=12)
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ], spacing=20, alignment=ft.MainAxisAlignment.CENTER)
+            
+            # Add analytics sections to clan_analytics container
+            clan_analytics.controls = [
+                ft.Text("📊 Analytiques du Clan", size=24, weight=ft.FontWeight.BOLD),
+                ft.Divider(),
+                ft.Row([
+                    ft.Column([
+                        ft.Text("🏅 Top 5 Donateurs", size=18, weight=ft.FontWeight.BOLD),
+                        top_donors_table,
+                    ], width=400),
+                    ft.Column([
+                        ft.Text("📈 Distribution des Dons", size=18, weight=ft.FontWeight.BOLD),
+                        don_bars,
+                    ], width=350),
+                ], spacing=30),
+                ft.Divider(),
+                ft.Row([
+                    ft.Column([
+                        ft.Text(f"⚠️ Membres sans dons ({len(zero_dons_list)})", size=18, weight=ft.FontWeight.BOLD),
+                        zero_dons_table if zero_dons_list else ft.Text("✅ Tout le monde a donné !", color=ft.Colors.GREEN),
+                    ], width=400),
+                    ft.Column([
+                        ft.Text(f"🔴 Inactifs 7+ jours ({len(inactive_list)})", size=18, weight=ft.FontWeight.BOLD),
+                        inactive_table if inactive_list else ft.Text("✅ Tout le monde est actif !", color=ft.Colors.GREEN),
+                    ], width=400),
+                ], spacing=30),
             ]
             
             # Update player dropdown
@@ -552,7 +637,11 @@ def main(page: ft.Page):
                         clan_progress,
                         clan_status,
                         clan_stats,
-                        ft.Container(content=clan_table, height=450),
+                        ft.Divider(),
+                        clan_analytics,
+                        ft.Divider(),
+                        ft.Text("📋 Liste Complète des Membres", size=18, weight=ft.FontWeight.BOLD),
+                        ft.Container(content=clan_table, height=350),
                     ], spacing=10, scroll=ft.ScrollMode.AUTO),
                     padding=20,
                 ),
