@@ -21,6 +21,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install flet pyinstaller requests
       
+      - name: Clean build directories
+        run: |
+          if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+          if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
+        shell: pwsh
+      
       - name: Build Windows exe
         run: flet pack flet_app.py --name "CR Recruiter"
       
@@ -44,6 +50,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install flet pyinstaller requests
+      
+      - name: Clean build directories
+        run: |
+          rm -rf build dist
       
       - name: Build macOS app
         run: flet pack flet_app.py --name "CR Recruiter"
