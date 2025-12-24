@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import os
 import json
+import plotly.express as px
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -39,6 +40,8 @@ if 'found' not in st.session_state:
     st.session_state.found = []
 if 'last_notified' not in st.session_state:
     st.session_state.last_notified = 0
+if 'clan_members' not in st.session_state:
+    st.session_state.clan_members = []
 
 def start_scan():
     st.session_state.scanning = True
@@ -166,7 +169,7 @@ def get_clan(tag):
         return None
 
 # --- TABS ---
-tab_scan, tab_stats, tab_clan = st.tabs(["🔍 Recherche", "📊 Statistiques", "🏰 Mon Clan"])
+tab_scan, tab_stats, tab_clan, tab_analysis = st.tabs(["🔍 Recherche", "📊 Statistiques", "🏰 Mon Clan", "🕹️ Analyse Joueur"])
 
 with tab_scan:
     # Métriques
@@ -436,6 +439,9 @@ with tab_clan:
                 
                 progress_bar.empty()
                 
+                # Sauvegarder les membres pour l'onglet Analyse
+                st.session_state.clan_members = member_data
+                
                 df_members = pd.DataFrame(member_data)
                 
                 # Stats du clan
@@ -474,3 +480,164 @@ with tab_clan:
                 st.download_button("📥 Exporter CSV", csv, "clan_members.csv", "text/csv")
         else:
             st.error("Impossible de charger les données du clan. Vérifiez le tag et votre clé API.")
+
+with tab_analysis:
+    st.subheader("🕹️ Analyse détaillée du joueur")
+    
+    # Dropdown pour les membres du clan s'ils sont chargés
+    if st.session_state.clan_members:
+        member_options = {f"{m['Nom']} ({m['Tag']})": m['Tag'] for m in st.session_state.clan_members}
+        selected_member = st.selectbox("👥 Choisir un membre du clan", options=[""] + list(member_options.keys()))
+        if selected_member:
+            analysis_tag = member_options[selected_member]
+        else:
+            analysis_tag = st.text_input("Ou entrer un Tag manuellement", value="#PL0Q8UGR")
+    else:
+        analysis_tag = st.text_input("Tag du joueur à analyser", value="#PL0Q8UGR")
+        st.caption("💡 Chargez un clan dans l'onglet 'Mon Clan' pour avoir une liste déroulante des membres.")
+    
+    if st.button("📈 Lancer l'analyse", key="btn_analysis"):
+        with st.spinner("Analyse en cours..."):
+            player = get_player(analysis_tag)
+            battles = get_battle_log(analysis_tag)
+            
+            if player:
+                # --- PROFIL DU JOUEUR ---
+                st.markdown(f"## 👤 {player.get('name', 'N/A')} `{player.get('tag', '')}`")
+                
+                # Métriques principales
+                col1, col2, col3, col4, col5 = st.columns(5)
+                col1.metric("🏆 Trophées", player.get('trophies', 0))
+                col2.metric("⭐ Best", player.get('bestTrophies', 0))
+                col3.metric("👑 Niveau", player.get('expLevel', 0))
+                col4.metric("🎯 Victoires", player.get('wins', 0))
+                col5.metric("❌ Défaites", player.get('losses', 0))
+                
+                col6, col7, col8, col9, col10 = st.columns(5)
+                col6.metric("👑 3 Couronnes", player.get('threeCrownWins', 0))
+                col7.metric("🏅 Max Défi", player.get('challengeMaxWins', 0))
+                col8.metric("🎴 Cartes Défi", player.get('challengeCardsWon', 0))
+                col9.metric("⚔️ Guerres", player.get('warDayWins', 0))
+                col10.metric("💰 Dons Totaux", player.get('totalDonations', 0))
+                
+                fav_card = player.get('currentFavouriteCard', {}).get('name', 'N/A')
+                st.info(f"🃏 **Carte Favorite:** {fav_card}")
+                
+                st.divider()
+                
+                # --- GRAPHIQUES JOUEUR ---
+                st.subheader("📊 Statistiques Globales")
+                
+                total_battles = player.get('battleCount', 0)
+                total_wins = player.get('wins', 0)
+                total_losses = player.get('losses', 0)
+                win_rate_global = (total_wins / total_battles * 100) if total_battles > 0 else 0
+                
+                col_chart1, col_chart2 = st.columns(2)
+                
+                with col_chart1:
+                    fig_global = px.pie(
+                        values=[total_wins, total_losses],
+                        names=["Victoires", "Défaites"],
+                        color_discrete_sequence=["#00CC66", "#FF4444"],
+                        title=f"Win Rate Global: {win_rate_global:.1f}%",
+                        hole=0.4
+                    )
+                    st.plotly_chart(fig_global, use_container_width=True)
+                
+                with col_chart2:
+                    # Bar chart des stats
+                    stats_data = {
+                        "Stat": ["Victoires", "Défaites", "3 Couronnes", "Guerres Gagnées"],
+                        "Valeur": [total_wins, total_losses, player.get('threeCrownWins', 0), player.get('warDayWins', 0)]
+                    }
+                    fig_bar = px.bar(stats_data, x="Stat", y="Valeur", color="Stat", title="Statistiques de Combat")
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                
+                st.divider()
+                
+                # --- ANALYSE BATTLELOG ---
+                if battles:
+                    st.subheader("🕹️ Analyse des 25 derniers combats")
+                    
+                    wins, losses, draws = 0, 0, 0
+                    card_stats = {}
+                    game_types = {}
+                    
+                    for b in battles:
+                        team_crowns = sum([p.get('crowns', 0) for p in b.get('team', [])])
+                        opp_crowns = sum([p.get('crowns', 0) for p in b.get('opponent', [])])
+                        
+                        outcome = "win" if team_crowns > opp_crowns else ("loss" if team_crowns < opp_crowns else "draw")
+                        if outcome == "win": wins += 1
+                        elif outcome == "loss": losses += 1
+                        else: draws += 1
+                        
+                        # Type de partie
+                        game_type = b.get('type', 'Unknown')
+                        game_types[game_type] = game_types.get(game_type, 0) + 1
+                        
+                        for opp in b.get('opponent', []):
+                            for card in opp.get('cards', []):
+                                name = card.get('name')
+                                if name not in card_stats:
+                                    card_stats[name] = {'wins': 0, 'losses': 0, 'draws': 0, 'total': 0}
+                                card_stats[name]['total'] += 1
+                                if outcome == "win": card_stats[name]['wins'] += 1
+                                elif outcome == "loss": card_stats[name]['losses'] += 1
+                                else: card_stats[name]['draws'] += 1
+                    
+                    total_recent = wins + losses + draws
+                    recent_wr = (wins / total_recent * 100) if total_recent > 0 else 0
+                    
+                    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+                    col_r1.metric("🏁 Matchs Récents", total_recent)
+                    col_r2.metric("✅ Victoires", wins)
+                    col_r3.metric("❌ Défaites", losses)
+                    col_r4.metric("📈 Win Rate Récent", f"{recent_wr:.1f}%")
+                    
+                    col_pie, col_bar = st.columns(2)
+                    
+                    with col_pie:
+                        fig_recent = px.pie(
+                            values=[wins, losses, draws],
+                            names=["Victoires", "Défaites", "Égalités"],
+                            color_discrete_sequence=["#00CC66", "#FF4444", "#888888"],
+                            title="Résultats Récents",
+                            hole=0.4
+                        )
+                        st.plotly_chart(fig_recent, use_container_width=True)
+                    
+                    with col_bar:
+                        if game_types:
+                            fig_types = px.bar(
+                                x=list(game_types.keys()),
+                                y=list(game_types.values()),
+                                title="Types de Parties",
+                                labels={"x": "Type", "y": "Nombre"}
+                            )
+                            st.plotly_chart(fig_types, use_container_width=True)
+                    
+                    st.divider()
+                    
+                    # Match-ups cartes
+                    st.subheader("🃏 Match-ups Cartes")
+                    
+                    rows = []
+                    for name, s in card_stats.items():
+                        wr = (s['wins'] / s['total'] * 100) if s['total'] > 0 else 0
+                        rows.append({"Carte": name, "Rencontres": s['total'], "Win Rate %": round(wr, 1)})
+                    
+                    df_cards = pd.DataFrame(rows)
+                    
+                    col_v, col_b = st.columns(2)
+                    with col_v:
+                        st.write("#### 💪 Tes victimes")
+                        st.dataframe(df_cards[df_cards['Rencontres'] >= 2].nlargest(10, 'Win Rate %'), use_container_width=True, hide_index=True)
+                    with col_b:
+                        st.write("#### ⚠️ Tes bourreaux")
+                        st.dataframe(df_cards[df_cards['Rencontres'] >= 2].nsmallest(10, 'Win Rate %'), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("Aucun combat trouvé dans le battle log.")
+            else:
+                st.error("Impossible de charger ce joueur. Vérifiez le tag.")
